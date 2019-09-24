@@ -125,10 +125,14 @@ void spi_read(u8 data_length, u8 api_command );
 u8 check_cts(void);
 void fifo_reset(void);
 void spi_write_fifo(void);
+void spi_read_fifo(void);
 void enable_tx_interrupt(void);
+void enable_rx_interrupt(void);
 void clr_interrupt(void);
 void tx_start(void);
+void rx_start(void);
 void tx_data(void);
+void rx_init(void);
 /************************** Variable Definitions *****************************/
 
 /*
@@ -155,6 +159,8 @@ XGpio Gpio; /* The Instance of the GPIO Driver */
 int main(void)
 {
 	int status;
+	unsigned char chksum,i;
+	volatile u32 nIRQ_status;
 	xil_printf("start run the si4463_test\r\n");
 	/* Initialize the GPIO driver  */
 	status = gpio_init(GPIO_ID);
@@ -162,17 +168,30 @@ int main(void)
 	{
 		xil_printf("gpio_init failed, and the return status is %d\r\n",status);
 	}
-	xil_printf("gpio_initilaze success");
+	xil_printf("gpio_initilaze success\r\n");
 	/*Initialize the Si4463 */
 	Si4463_Reset();
 	Si4463_Init();
+	ms_delay(50);
+	s_delay(1);
+	rx_init();
+	i = 0;
 	while(1)
 	{
-		xil_printf("delay 2s \r\n");
-		s_delay(2);
-		tx_data();
+		if(((XGpio_DiscreteRead(&Gpio,GPIO_CHANNEL) & 0x20)>>5 )== 0)
+		{
+			spi_read_fifo();
+			//读取数据
+			for(i = 0; i < 14; i++)
+				{
+					xil_printf("receive data seccess and the data[%d] is %x\r\n",i,rx_buf[i]);
+				}
+			fifo_reset();
+			clr_interrupt();
+			tx_data();
+			rx_init();
+		}
 	}
-
 
 }
 
@@ -569,6 +588,7 @@ void Si4463_Init(void)
 void tx_data(void)
 {
 	int i;
+	u8 temp;
 	Flag.is_tx = 1;
 	fifo_reset();
 	spi_write_fifo();
@@ -577,24 +597,15 @@ void tx_data(void)
 
 	tx_start();
 	xil_printf("Si4463 start transmit data \r\n");
-	rf_timeout = 0;
-	Flag.rf_reach_timeout = 0;
+//	rf_timeout = 0;
 
 	i = 0;
-	/*
-	while(nIRQ)
+	while((XGpio_DiscreteRead(&Gpio,GPIO_CHANNEL) & 0x20)>>5)
 	{
-		ms_delay(1);
-		i++;
-		if(i>500)
-		{
-			xil_printf("Tx_data timeout , reset and initialize si4463\r\n");
-			Si4463_Reset();
- 			Si4463_Init();
-			break;
-		}
+		check_cts();
 	}
-	*/
+	ms_delay(100);
+	clr_interrupt();
 	Flag.is_tx = 0;
 	xil_printf("Si4463 success Transmit data\r\n");
 }
@@ -613,6 +624,7 @@ void fifo_reset(void)			// reset FIFO
 	p[0] = FIFO_INFO;
 	p[1] = 0x03;   // reset tx ,rx fifo
 	spi_write(2,p);
+
 }
 /*---------------------------------------------------------------------------*/
  /*
@@ -647,6 +659,35 @@ void spi_write_fifo(void)
  /*
  *
  *
+ * 将数据从FIFO中读出
+ *
+ *
+ * ---------------------------------------------------------------------------*/
+void spi_read_fifo(void)
+{
+	u8 i;
+
+	i = 0;
+	while(i!=0xff)
+		i = check_cts();
+
+	//nSEL = 1;
+	XGpio_DiscreteSet(&Gpio,GPIO_CHANNEL,nSEL);
+	//SCK = 0;
+	XGpio_DiscreteClear(&Gpio,GPIO_CHANNEL,SCLK);
+	//nSEL = 0;
+	XGpio_DiscreteClear(&Gpio,GPIO_CHANNEL,nSEL);
+	spi_byte(READ_RX_FIFO);
+	for (i = 0; i< payload_length; i++)
+		rx_buf[i] = spi_byte(0xff);
+	//nSEL = 1;
+	XGpio_DiscreteSet(&Gpio,GPIO_CHANNEL,nSEL);
+}
+
+/*---------------------------------------------------------------------------*/
+ /*
+ *
+ *
  * 配置4463 的发射中断，告知模块发射完毕数据后置低NIRQ
  *
  *
@@ -663,6 +704,29 @@ void enable_tx_interrupt(void)
 	p[5] = 0x20;
 	spi_write(0x06, p);
 }
+/*---------------------------------------------------------------------------*/
+ /*
+ *
+ *
+ * 配置 4463 的发射中断，告知模块接收到完整的数据包后置低 NIRQ
+ *
+ *
+ * ---------------------------------------------------------------------------*/
+
+void enable_rx_interrupt(void)
+{
+	u8 p[7];
+
+	p[0] = 0x11;
+	p[1] = 0x01;  // 0x0100
+	p[2] = 0x03;// 3 parameters
+	p[3] = 0x00;   // 0100
+	p[4] = 0x03;   // ph, modem int
+	p[5] = 0x18; // 0x10;   // Pack received int
+	p[6] = 0x00;   //preamble int, sync int setting
+	spi_write(0x07, p);  // enable  packet receive interrupt
+}
+
 /*---------------------------------------------------------------------------*/
  /*
  *
@@ -701,3 +765,44 @@ void tx_start(void)
 	p[4] = 0;
 	spi_write(5, p);
 }
+/*---------------------------------------------------------------------------*/
+ /*
+ *
+ *
+ * 开始接收
+ *
+ *
+ * ---------------------------------------------------------------------------*/
+
+void rx_start(void)
+{
+	u8 p[8];
+
+	p[0] = START_RX ;
+	p[1] = freq_channel ; 			//	channel 0
+	p[2] = 0x00;
+	p[3] = 0;
+	p[4] = 0;
+	p[5] = 0;
+	p[6] = 0x08;
+	p[7] = 0x08;
+	spi_write(8, p);
+}
+/*---------------------------------------------------------------------------*/
+ /*
+ *
+ *
+ * 初始化接收状态，准备接收数据
+ *
+ *
+ * ---------------------------------------------------------------------------*/
+
+void rx_init(void)
+{
+	Flag.is_tx = 0;
+	fifo_reset();
+	enable_rx_interrupt();
+	clr_interrupt();
+	rx_start();
+}
+
